@@ -75,8 +75,8 @@
                 </svg>
                 Log in with Google
             </button>
-            
-            <p id="login-status" style="margin-top: 15px; font-size: 14px; font-weight: bold; color: #262626;">Waiting for login...</p>
+            <p id="login-status" style="margin-top: 15px; font-size: 14px; font-weight: bold; color: #262626;"></p>
+            <p style="font-size: 11px; color: #8e8e8e; margin-top: 5px;">Make sure you are NOT in Incognito Mode.</p>
             <div id="debug-log"></div>
         </div>
     </div>
@@ -128,8 +128,8 @@
 
 <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-    // Using signInWithPopup to bypass page-reload data loss
-    import { getAuth, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+    // Back to Redirect for mobile popup bypass
+    import { getAuth, signInWithRedirect, getRedirectResult, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
     import { getFirestore, collection, doc, setDoc, getDoc, addDoc, query, where, onSnapshot, serverTimestamp, updateDoc, orderBy } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
 
     // 🔴 === PASTE YOUR CONFIG HERE CAREFULLY === 🔴
@@ -142,7 +142,6 @@
   appId: "1:864924156370:web:816408ac2be18cb077480b"
 };
 
-    // Initialize Firebase
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const db = getFirestore(app);
@@ -154,11 +153,12 @@
     let currentChatId = null;
     let unsubMessages = null, unsubTyping = null, unsubInbox = null, unsubPartner = null;
 
-    // --- DEBUG LOGGER ---
     const statusTracker = document.getElementById('login-status');
+    const debugLog = document.getElementById('debug-log');
+
     function logError(title, error) {
         console.error(title, error);
-        document.getElementById('debug-log').innerHTML += `<b>${title}:</b><br>${error.message || error}<br><br>`;
+        debugLog.innerHTML += `<b>${title}:</b><br>${error.message || error}<br><br>`;
     }
 
     // --- NAVIGATION ---
@@ -171,23 +171,28 @@
             if(unsubTyping) unsubTyping();
             if(unsubPartner) unsubPartner();
             document.getElementById('inbox-search').value = ''; 
-            loadInbox(); // Load actual private chats
+            loadInbox(); 
         }
     };
 
-    // --- GOOGLE LOGIN (POPUP METHOD) ---
+    // --- GOOGLE LOGIN (Mobile-Safe Redirect) ---
     document.getElementById('btn-google-login').addEventListener('click', () => {
-        statusTracker.innerText = "Opening Google window...";
-        document.getElementById('debug-log').innerHTML = ""; 
-        
-        signInWithPopup(auth, googleProvider)
-            .then((result) => {
-                statusTracker.innerText = "Google Auth Success! Loading profile...";
-            })
-            .catch((error) => {
-                statusTracker.innerText = "Login stopped or failed.";
-                logError("Popup Error", error);
-            });
+        statusTracker.innerText = "Redirecting to Google...";
+        debugLog.innerHTML = ""; 
+        signInWithRedirect(auth, googleProvider).catch(error => {
+            logError("Failed to open Google", error);
+        });
+    });
+
+    // CAREFULLY CATCH THE RETURN FROM GOOGLE
+    statusTracker.innerText = "Checking secure session...";
+    getRedirectResult(auth).then((result) => {
+        if (result && result.user) {
+            statusTracker.innerText = "Google Auth Success! Loading profile...";
+        }
+    }).catch((error) => {
+        statusTracker.innerText = "Login blocked. Are you in Incognito mode?";
+        logError("Redirect Error", error);
     });
 
     document.getElementById('btn-logout').addEventListener('click', async () => {
@@ -205,14 +210,11 @@
                 const userDoc = await getDoc(userDocRef);
                 
                 if (!userDoc.exists()) {
-                    statusTracker.innerText = "No username found. Routing to Setup...";
                     navigateTo('setup-screen');
                 } else {
-                    statusTracker.innerText = "Username found! Loading Inbox...";
                     currentUserData = userDoc.data();
                     document.getElementById('my-username-display').innerText = currentUserData.username;
                     
-                    // Mark as online
                     await updateDoc(userDocRef, { isOnline: true });
                     window.addEventListener('beforeunload', () => { updateDoc(userDocRef, { isOnline: false }); });
                     
@@ -226,7 +228,10 @@
             currentUser = null;
             currentUserData = null;
             navigateTo('login-screen');
-            statusTracker.innerText = "Waiting for login...";
+            // Only overwrite status if we aren't displaying an error
+            if (!statusTracker.innerText.includes("blocked")) {
+                statusTracker.innerText = "Waiting for login...";
+            }
         }
     });
 
@@ -257,7 +262,6 @@
         else { loadInbox(); }
     });
 
-    // SEARCH LOGIC: Looks for new people in 'users' collection
     function performSearch(term) {
         if(unsubInbox) unsubInbox(); 
         const list = document.getElementById('inbox-list');
@@ -277,7 +281,6 @@
         });
     }
 
-    // INBOX LOGIC: Only pulls from 'chats' where you are a participant
     function loadInbox() {
         if(unsubInbox) unsubInbox();
         const list = document.getElementById('inbox-list');
@@ -290,7 +293,6 @@
             
             snapshot.forEach(doc => chatDocs.push(doc.data()));
             
-            // Sort chats so newest messages are at the top
             chatDocs.sort((a, b) => {
                 const timeA = a.lastUpdated ? a.lastUpdated.toMillis() : 0;
                 const timeB = b.lastUpdated ? b.lastUpdated.toMillis() : 0;
@@ -337,7 +339,6 @@
         currentChatId = `${uids[0]}_${uids[1]}`;
         const thread = document.getElementById('message-thread');
         
-        // Listen for Live Online Status (Green Dot)
         if(unsubPartner) unsubPartner();
         unsubPartner = onSnapshot(doc(db, "users", partner.uid), (docSnap) => {
             if(docSnap.exists() && docSnap.data().isOnline) {
@@ -347,7 +348,6 @@
             }
         });
 
-        // Listen for Messages
         const q = query(collection(db, "chats", currentChatId, "messages"), orderBy("timestamp", "asc"));
         unsubMessages = onSnapshot(q, (snapshot) => {
             thread.innerHTML = '';
@@ -378,12 +378,13 @@
             thread.scrollTop = thread.scrollHeight; 
         });
 
-        // Listen for Typing 
         unsubTyping = onSnapshot(doc(db, "chats", currentChatId), (docSnap) => {
             const ind = document.getElementById('typing-indicator');
             if(docSnap.exists() && docSnap.data().typing === currentChatPartnerId) {
                 ind.style.display = 'block';
-            } else { ind.style.display = 'none'; }
+            } else {
+                ind.style.display = 'none';
+            }
         });
     }
 
@@ -401,4 +402,36 @@
         
         clearTimeout(typingTimeout);
         typingTimeout = setTimeout(() => { 
-            setDoc(doc(db, "chats", currentChatId), { typing: null }, 
+            setDoc(doc(db, "chats", currentChatId), { typing: null }, { merge: true }); 
+        }, 1500);
+    });
+
+    async function sendMessage() {
+        const text = msgInput.value.trim();
+        if(!text || !currentChatId) return;
+        msgInput.value = '';
+
+        await setDoc(doc(db, "chats", currentChatId), { 
+            typing: null, 
+            lastUpdated: serverTimestamp(),
+            lastMessage: text,
+            participants: [currentUser.uid, currentChatPartnerId],
+            participantNames: {
+                [currentUser.uid]: currentUserData.username,
+                [currentChatPartnerId]: document.getElementById('chat-partner-name').innerText
+            }
+        }, { merge: true });
+
+        await addDoc(collection(db, "chats", currentChatId, "messages"), {
+            text: text,
+            senderId: currentUser.uid,
+            timestamp: serverTimestamp(),
+            isSeen: false
+        });
+    }
+
+    document.getElementById('btn-send').addEventListener('click', sendMessage);
+    msgInput.addEventListener('keypress', (e) => { if(e.key === 'Enter') sendMessage(); });
+</script>
+</body>
+</html>
